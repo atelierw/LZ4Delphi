@@ -366,18 +366,24 @@ begin
         exit;
     XXH32_reset(PXXH32_state_t(@state), 0);
     buffer := allocmem(blockSize);
-    LFileStream := TFileStream.Create(edFilename.Text, fmOpenRead);
-    bytesRead := LFileStream.Read(buffer^, blockSize);
-    while bytesRead > 0 do
-    begin
-        XXH32_update(PXXH32_state_t(@state), buffer, bytesRead);
+    if buffer = nil then
+        exit;
+    try
+        LFileStream := TFileStream.Create(edFilename.Text, fmOpenRead);
         bytesRead := LFileStream.Read(buffer^, blockSize);
+        while bytesRead > 0 do
+        begin
+            XXH32_update(PXXH32_state_t(@state), buffer, bytesRead);
+            bytesRead := LFileStream.Read(buffer^, blockSize);
+        end;
+        LFileStream.Free;
+
+        h32 := XXH32_digest(PXXH32_state_t(@state));
+
+        Memo.Lines.Add(format('%x', [h32]));
+    finally
+        freemem(buffer);
     end;
-    LFileStream.Free;
-
-    h32 := XXH32_digest(PXXH32_state_t(@state));
-
-    Memo.Lines.Add(format('%x', [h32]));
 end;
 
 procedure TmainUnit.btHash64Click(Sender: TObject);
@@ -395,18 +401,25 @@ begin
 
     XXH64_reset(@state, 0);
     buffer := allocmem(blockSize);
-    LFileStream := TFileStream.Create(edFilename.Text, fmOpenRead);
-    bytesRead := LFileStream.Read(buffer^, blockSize);
-    while bytesRead > 0 do
-    begin
-        XXH64_update(@state, buffer, bytesRead);
+    if buffer = nil then
+        exit;
+    try
+        LFileStream := TFileStream.Create(edFilename.Text, fmOpenRead);
         bytesRead := LFileStream.Read(buffer^, blockSize);
+
+        while bytesRead > 0 do
+        begin
+            XXH64_update(@state, buffer, bytesRead);
+            bytesRead := LFileStream.Read(buffer^, blockSize);
+        end;
+        LFileStream.Free;
+
+        h64 := XXH64_digest(@state);
+
+        Memo.Lines.Add(format('%x', [h64]));
+    finally
+        freemem(buffer);
     end;
-    LFileStream.Free;
-
-    h64 := XXH64_digest(@state);
-
-    Memo.Lines.Add(format('%x', [h64]));
 end;
 
 procedure TmainUnit.btSelectClick(Sender: TObject);
@@ -459,6 +472,9 @@ var
     ii: size_t;
 begin
     fileIdx := 0;
+    chunkP := nil;
+    compressed_buff := nil;
+    orig_buff := nil;
     compressionFunction := nil;
     stateLZ4 := LZ4_createStream();
     stateLZ4HC := LZ4_createStreamHC();
@@ -479,207 +495,204 @@ begin
         Memo.Lines.Add(format('Not enough memory for %s full size; testing %i MB only', [inFileName, benchedSize shr 20]));
 
     chunkP := allocmem(((benchedSize div size_t(chunkSize)) + 1) * sizeof(chunkParameters));
+    if chunkP = nil then
+        exit;
     orig_buff := allocmem(size_t(benchedSize));
     nbChunks := integer((integer(benchedSize) + (chunkSize - 1)) div chunkSize);
     maxCompressedChunkSize := LZ4_compressBound(chunkSize);
     compressedBuffSize := nbChunks * maxCompressedChunkSize;
     compressed_buff := allocmem(size_t(compressedBuffSize));
-    if (orig_buff = nil) or (compressed_buff = nil) then
-    begin
-        Memo.Lines.Add('Error: not enough memory!');
-        if orig_buff <> nil then
-            freemem(orig_buff);
-        if compressed_buff <> nil then
-            freemem(compressed_buff);
-        freemem(chunkP);
+    try
+        if (orig_buff = nil) or (compressed_buff = nil) then
+        begin
+            Memo.Lines.Add('Error: not enough memory!');
+            LFileStream.Free;
+            exit;
+        end;
+        Memo.Lines.Add(format('Loading %s...       ', [inFileName]));
+        readSize := LFileStream.Read(orig_buff^, benchedSize);
         LFileStream.Free;
-        exit;
-    end;
-    Memo.Lines.Add(format('Loading %s...       ', [inFileName]));
-    readSize := LFileStream.Read(orig_buff^, benchedSize);
-    LFileStream.Free;
-    if (readSize <> benchedSize) then
-    begin
-        Memo.Lines.Add(format('Error: problem reading file %s !!', [inFileName]));
+        if (readSize <> benchedSize) then
+        begin
+            Memo.Lines.Add(format('Error: problem reading file %s !!', [inFileName]));
+            exit;
+        end;
+        bestTime := 100000000.;
+        remaining := benchedSize;
+        _in := orig_buff;
+        _out := compressed_buff;
+        nbChunks := integer((integer(benchedSize) + (chunkSize - 1)) div chunkSize);
+        for i := 0 to nbChunks - 1 do
+        begin
+            chunkP[i].id := i;
+            chunkP[i].origBuffer := _in;
+            inc(_in, chunkSize);
+            if (integer(remaining) > chunkSize) then
+            begin
+                chunkP[i].origSize := chunkSize;
+                dec(remaining, chunkSize);
+            end
+            else
+            begin
+                chunkP[i].origSize := integer(remaining);
+                remaining := 0;
+            end;
+            chunkP[i].compressedBuffer := _out;
+            inc(_out, maxCompressedChunkSize);
+            chunkP[i].compressedSize := 0;
+        end;
+        InitFunction := nil;
+
+        if cbCompressionFunction.ItemIndex = 1 then // LZ4_compress
+        begin
+            compressorName := 'LZ4_compress';
+            compressionFunction := local_LZ4_compress;
+        end
+        else if cbCompressionFunction.ItemIndex = 2 then // LZ4_compress_limitedOutput
+        begin
+            compressorName := 'LZ4_compress_limitedOutput';
+            compressionFunction := local_LZ4_compress_limitedOutput;
+        end
+        else if cbCompressionFunction.ItemIndex = 3 then // LZ4_compress_withState
+        begin
+            compressorName := 'LZ4_compress_withState';
+            compressionFunction := local_LZ4_compress_withState;
+        end
+        else if cbCompressionFunction.ItemIndex = 4 then // LZ4_compress_withState
+        begin
+            compressorName := 'LZ4_compress_limitedOutput_withState';
+            compressionFunction := local_LZ4_compress_withState;
+        end
+        else if cbCompressionFunction.ItemIndex = 5 then // LZ4_compress_continue
+        begin
+            compressorName := 'LZ4_compress_continue';
+            InitFunction := LZ4_create;
+            compressionFunction := local_LZ4_compress_continue;
+        end
+        else if cbCompressionFunction.ItemIndex = 6 then // LZ4_compress_limitedOutput_continue
+        begin
+            compressorName := 'LZ4_compress_limitedOutput_continue';
+            InitFunction := LZ4_create;
+            compressionFunction := local_LZ4_compress_limitedOutput_continue;
+        end
+        else if cbCompressionFunction.ItemIndex = 7 then // LZ4_compressHC
+        begin
+            compressorName := 'LZ4_compressHC';
+            compressionFunction := local_LZ4_compressHC;
+        end
+        else if cbCompressionFunction.ItemIndex = 8 then // LZ4_compressHC_limitedOutput
+        begin
+            compressorName := 'LZ4_compressHC_limitedOutput';
+            compressionFunction := local_LZ4_compressHC_limitedOutput;
+        end
+        else if cbCompressionFunction.ItemIndex = 9 then // LZ4_compressHC_withStateHC
+        begin
+            compressorName := 'LZ4_compressHC_withStateHC';
+            compressionFunction := local_LZ4_compressHC_withStateHC;
+        end
+        else if cbCompressionFunction.ItemIndex = 10 then // LZ4_compressHC_withStateHC
+        begin
+            compressorName := 'LZ4_compressHC_limitedOutput_withStateHC';
+            compressionFunction := local_LZ4_compressHC_limitedOutput_withStateHC;
+        end
+        else if cbCompressionFunction.ItemIndex = 11 then // LZ4_compressHC_continue
+        begin
+            compressorName := 'LZ4_compressHC_continue';
+            compressionFunction := local_LZ4_compressHC_continue;
+            InitFunction := LZ4_createHC;
+        end
+        else if cbCompressionFunction.ItemIndex = 12 then // LZ4_compressHC_limitedOutput_continue
+        begin
+            compressorName := 'LZ4_compressHC_limitedOutput_continue';
+            compressionFunction := local_LZ4_compressHC_limitedOutput_continue;
+            InitFunction := LZ4_createHC;
+        end
+        else if cbCompressionFunction.ItemIndex = 13 then // LZ4_compress_forceDict
+        begin
+            compressorName := 'LZ4_compress_forceDict';
+            compressionFunction := local_LZ4_compress_forceDict;
+
+            InitFunction := local_LZ4_resetDictT;
+        end
+        else if cbCompressionFunction.ItemIndex = 14 then // LZ4F_compressFrame
+        begin
+            compressorName := 'LZ4F_compressFrame';
+            compressionFunction := local_LZ4F_compressFrame;
+            chunkP[0].origSize := integer(benchedSize);
+            nbChunks := 1;
+        end
+        else if cbCompressionFunction.ItemIndex = 15 then // LZ4_saveDict
+        begin
+            compressorName := 'LZ4_saveDict';
+            compressionFunction := local_LZ4_saveDict;
+            LZ4_loadDict(@LZ4_dict, chunkP[0].origBuffer, chunkP[0].origSize);
+        end
+        else if cbCompressionFunction.ItemIndex = 16 then // LZ4_saveDictHC
+        begin
+            compressorName := 'LZ4_saveDictHC';
+            compressionFunction := local_LZ4_saveDictHC;
+            LZ4_loadDictHC(@LZ4_dictHC, chunkP[0].origBuffer, chunkP[0].origSize);
+        end;
+
+        for ii := 0 to benchedSize - 1 do
+            compressed_buff[ii] := Ansichar(ii);
+
+        for loopNb := 1 to nbIterations do
+        begin
+            nb_loops := 0;
+            Stopwatch.start;
+            Elapsed := Stopwatch.Elapsed;
+            milliTime1 := Elapsed.TotalMilliseconds;
+
+            while true do
+            begin
+                Elapsed := Stopwatch.Elapsed;
+                if Elapsed.TotalMilliseconds - milliTime1 > TIMELOOP then
+                    break;
+                if (@InitFunction <> Nil) then
+                    ctx := InitFunction(chunkP[0].origBuffer);
+                for chunkNb := 0 to nbChunks - 1 do
+                begin
+                    chunkP[chunkNb].compressedSize := compressionFunction(chunkP[chunkNb].origBuffer, chunkP[chunkNb].compressedBuffer,
+                      chunkP[chunkNb].origSize);
+                    if (chunkP[chunkNb].compressedSize = 0) then
+                    begin
+                        Memo.Lines.Add(format('ERROR ! %s() = 0 !!', [compressorName]));
+                        exit;
+                    end;
+                end;
+                if (@InitFunction <> Nil) then
+{$IFDEF USE_EXTERNAL_OBJ_LIBS}
+                    LZ4_freeStream(ctx);
+{$ELSE}
+                    freemem(ctx);
+{$ENDIF}
+                inc(nb_loops);
+            end;
+            Elapsed := Stopwatch.Elapsed;
+            Stopwatch.stop;
+            millitime2 := Elapsed.TotalMilliseconds;
+            averageTime := (millitime2 - milliTime1) / nb_loops;
+            if (averageTime < bestTime) then
+                bestTime := averageTime;
+            cSize := 0;
+            for chunkNb := 0 to nbChunks - 1 do
+                inc(cSize, chunkP[chunkNb].compressedSize);
+            ratio := cSize / benchedSize * 100.;
+            Memo.Lines.Add(format('%s %d ->%d %f, %f MB/s', [compressorName, integer(benchedSize), integer(cSize), ratio,
+              (benchedSize / bestTime) / 1000.]));
+        end;
+        LZ4_freeStream(stateLZ4);
+        LZ4_freeStreamHC(stateLZ4HC);
+        Memo.Lines.Add(format('%s test ended', [compressorName]));
+    finally
         if orig_buff <> nil then
             freemem(orig_buff);
         if compressed_buff <> nil then
             freemem(compressed_buff);
-        freemem(chunkP);
+        if chunkP <> nil then
+            freemem(chunkP);
     end;
-
-    bestTime := 100000000.;
-    remaining := benchedSize;
-    _in := orig_buff;
-    _out := compressed_buff;
-    nbChunks := integer((integer(benchedSize) + (chunkSize - 1)) div chunkSize);
-    for i := 0 to nbChunks - 1 do
-    begin
-        chunkP[i].id := i;
-        chunkP[i].origBuffer := _in;
-        inc(_in, chunkSize);
-        if (integer(remaining) > chunkSize) then
-        begin
-            chunkP[i].origSize := chunkSize;
-            dec(remaining, chunkSize);
-        end
-        else
-        begin
-            chunkP[i].origSize := integer(remaining);
-            remaining := 0;
-        end;
-        chunkP[i].compressedBuffer := _out;
-        inc(_out, maxCompressedChunkSize);
-        chunkP[i].compressedSize := 0;
-    end;
-    InitFunction := nil;
-
-    if cbCompressionFunction.ItemIndex = 1 then // LZ4_compress
-    begin
-        compressorName := 'LZ4_compress';
-        compressionFunction := local_LZ4_compress;
-    end
-    else if cbCompressionFunction.ItemIndex = 2 then // LZ4_compress_limitedOutput
-    begin
-        compressorName := 'LZ4_compress_limitedOutput';
-        compressionFunction := local_LZ4_compress_limitedOutput;
-    end
-    else if cbCompressionFunction.ItemIndex = 3 then // LZ4_compress_withState
-    begin
-        compressorName := 'LZ4_compress_withState';
-        compressionFunction := local_LZ4_compress_withState;
-    end
-    else if cbCompressionFunction.ItemIndex = 4 then // LZ4_compress_withState
-    begin
-        compressorName := 'LZ4_compress_limitedOutput_withState';
-        compressionFunction := local_LZ4_compress_withState;
-    end
-    else if cbCompressionFunction.ItemIndex = 5 then // LZ4_compress_continue
-    begin
-        compressorName := 'LZ4_compress_continue';
-        InitFunction := LZ4_create;
-        compressionFunction := local_LZ4_compress_continue;
-    end
-    else if cbCompressionFunction.ItemIndex = 6 then // LZ4_compress_limitedOutput_continue
-    begin
-        compressorName := 'LZ4_compress_limitedOutput_continue';
-        InitFunction := LZ4_create;
-        compressionFunction := local_LZ4_compress_limitedOutput_continue;
-    end
-    else if cbCompressionFunction.ItemIndex = 7 then // LZ4_compressHC
-    begin
-        compressorName := 'LZ4_compressHC';
-        compressionFunction := local_LZ4_compressHC;
-    end
-    else if cbCompressionFunction.ItemIndex = 8 then // LZ4_compressHC_limitedOutput
-    begin
-        compressorName := 'LZ4_compressHC_limitedOutput';
-        compressionFunction := local_LZ4_compressHC_limitedOutput;
-    end
-    else if cbCompressionFunction.ItemIndex = 9 then // LZ4_compressHC_withStateHC
-    begin
-        compressorName := 'LZ4_compressHC_withStateHC';
-        compressionFunction := local_LZ4_compressHC_withStateHC;
-    end
-    else if cbCompressionFunction.ItemIndex = 10 then // LZ4_compressHC_withStateHC
-    begin
-        compressorName := 'LZ4_compressHC_limitedOutput_withStateHC';
-        compressionFunction := local_LZ4_compressHC_limitedOutput_withStateHC;
-    end
-    else if cbCompressionFunction.ItemIndex = 11 then // LZ4_compressHC_continue
-    begin
-        compressorName := 'LZ4_compressHC_continue';
-        compressionFunction := local_LZ4_compressHC_continue;
-        InitFunction := LZ4_createHC;
-    end
-    else if cbCompressionFunction.ItemIndex = 12 then // LZ4_compressHC_limitedOutput_continue
-    begin
-        compressorName := 'LZ4_compressHC_limitedOutput_continue';
-        compressionFunction := local_LZ4_compressHC_limitedOutput_continue;
-        InitFunction := LZ4_createHC;
-    end
-    else if cbCompressionFunction.ItemIndex = 13 then // LZ4_compress_forceDict
-    begin
-        compressorName := 'LZ4_compress_forceDict';
-        compressionFunction := local_LZ4_compress_forceDict;
-
-        InitFunction := local_LZ4_resetDictT;
-    end
-    else if cbCompressionFunction.ItemIndex = 14 then // LZ4F_compressFrame
-    begin
-        compressorName := 'LZ4F_compressFrame';
-        compressionFunction := local_LZ4F_compressFrame;
-        chunkP[0].origSize := integer(benchedSize);
-        nbChunks := 1;
-    end
-    else if cbCompressionFunction.ItemIndex = 15 then // LZ4_saveDict
-    begin
-        compressorName := 'LZ4_saveDict';
-        compressionFunction := local_LZ4_saveDict;
-        LZ4_loadDict(@LZ4_dict, chunkP[0].origBuffer, chunkP[0].origSize);
-    end
-    else if cbCompressionFunction.ItemIndex = 16 then // LZ4_saveDictHC
-    begin
-        compressorName := 'LZ4_saveDictHC';
-        compressionFunction := local_LZ4_saveDictHC;
-        LZ4_loadDictHC(@LZ4_dictHC, chunkP[0].origBuffer, chunkP[0].origSize);
-    end;
-
-    for ii := 0 to benchedSize - 1 do
-        compressed_buff[ii] := Ansichar(ii);
-
-    for loopNb := 1 to nbIterations do
-    begin
-        nb_loops := 0;
-        Stopwatch.start;
-        Elapsed := Stopwatch.Elapsed;
-        milliTime1 := Elapsed.TotalMilliseconds;
-
-        while true do
-        begin
-            Elapsed := Stopwatch.Elapsed;
-            if Elapsed.TotalMilliseconds - milliTime1 > TIMELOOP then
-                break;
-            if (@InitFunction <> Nil) then
-                ctx := InitFunction(chunkP[0].origBuffer);
-            for chunkNb := 0 to nbChunks - 1 do
-            begin
-                chunkP[chunkNb].compressedSize := compressionFunction(chunkP[chunkNb].origBuffer, chunkP[chunkNb].compressedBuffer,
-                  chunkP[chunkNb].origSize);
-                if (chunkP[chunkNb].compressedSize = 0) then
-                begin
-                    Memo.Lines.Add(format('ERROR ! %s() = 0 !!', [compressorName]));
-                    exit;
-                end;
-            end;
-            if (@InitFunction <> Nil) then
-{$IFDEF USE_EXTERNAL_OBJ_LIBS}
-                LZ4_freeStream(ctx);
-{$ELSE}
-                freemem(ctx);
-{$ENDIF}
-            inc(nb_loops);
-        end;
-        Elapsed := Stopwatch.Elapsed;
-        Stopwatch.stop;
-        millitime2 := Elapsed.TotalMilliseconds;
-        averageTime := (millitime2 - milliTime1) / nb_loops;
-        if (averageTime < bestTime) then
-            bestTime := averageTime;
-        cSize := 0;
-        for chunkNb := 0 to nbChunks - 1 do
-            inc(cSize, chunkP[chunkNb].compressedSize);
-        ratio := cSize / benchedSize * 100.;
-        Memo.Lines.Add(format('%s %d ->%d %f, %f MB/s', [compressorName, integer(benchedSize), integer(cSize), ratio,
-          (benchedSize / bestTime) / 1000.]));
-    end;
-    LZ4_freeStream(stateLZ4);
-    LZ4_freeStreamHC(stateLZ4HC);
-
-    freemem(orig_buff);
-    freemem(compressed_buff);
-    freemem(chunkP);
-    Memo.Lines.Add(format('%s test ended', [compressorName]));
 end;
 
 procedure TmainUnit.btTestDecompFunctionsClick(Sender: TObject);
@@ -701,7 +714,7 @@ var
     compressed_buff: pAnsiChar;
     readSize: size_t;
     crcOriginal: cardinal;
-    loopNb, nb_loops, chunkNb : integer;
+    loopNb, nb_loops, chunkNb: integer;
     cSize: size_t;
     ratio: double;
     compressorName: string;
@@ -718,7 +731,10 @@ var
     crcDecoded: cardinal;
 begin
     fileIdx := 0;
+    chunkP := nil;
+    compressed_buff := nil;
     decompressionFunction := nil;
+    orig_buff := nil;
     errorCode := LZ4F_createDecompressionContext(g_dCtx, LZ4F_VERSION);
     if (LZ4F_isError(errorCode)) then
     begin
@@ -742,172 +758,173 @@ begin
         Memo.Lines.Add(format('Not enough memory for %s full size; testing %i MB only', [inFileName, benchedSize shr 20]));
 
     chunkP := allocmem(((benchedSize div size_t(chunkSize)) + 1) * sizeof(chunkParameters));
+    if chunkP = nil then
+        exit;
     orig_buff := allocmem(size_t(benchedSize));
     nbChunks := integer((integer(benchedSize) + (chunkSize - 1)) div chunkSize);
     maxCompressedChunkSize := LZ4_compressBound(chunkSize);
     compressedBuffSize := nbChunks * maxCompressedChunkSize;
     compressed_buff := allocmem(size_t(compressedBuffSize));
-    if (orig_buff = nil) or (compressed_buff = nil) then
-    begin
-        Memo.Lines.Add('Error: not enough memory!');
-        if orig_buff <> nil then
-            freemem(orig_buff);
-        if compressed_buff <> nil then
-            freemem(compressed_buff);
-        freemem(chunkP);
-        LFileStream.Free;
+    if compressed_buff = nil then
         exit;
-    end;
-    Memo.Lines.Add(format('Loading %s...       ', [inFileName]));
-    readSize := LFileStream.Read(orig_buff^, benchedSize);
-    LFileStream.Free;
-    if (readSize <> benchedSize) then
-    begin
-        Memo.Lines.Add(format('Error: problem reading file %s !!', [inFileName]));
+    try
+        if (orig_buff = nil) or (compressed_buff = nil) then
+        begin
+            Memo.Lines.Add('Error: not enough memory!');
+            LFileStream.Free;
+            exit;
+        end;
+        Memo.Lines.Add(format('Loading %s...       ', [inFileName]));
+        readSize := LFileStream.Read(orig_buff^, benchedSize);
+        LFileStream.Free;
+        if (readSize <> benchedSize) then
+        begin
+            Memo.Lines.Add(format('Error: problem reading file %s !!', [inFileName]));
+            exit;
+        end;
+        crcOriginal := XXH32(orig_buff, cardinal(benchedSize), 0);
+
+        cSize := 0;
+        ratio := 0.;
+        bestTime := 100000000.;
+        remaining := benchedSize;
+        _in := orig_buff;
+        _out := compressed_buff;
+        nbChunks := integer((integer(benchedSize) + (chunkSize - 1)) div chunkSize);
+        for i := 0 to nbChunks - 1 do
+        begin
+            chunkP[i].id := i;
+            chunkP[i].origBuffer := _in;
+            inc(_in, chunkSize);
+            if (integer(remaining) > chunkSize) then
+            begin
+                chunkP[i].origSize := chunkSize;
+                dec(remaining, chunkSize);
+            end
+            else
+            begin
+                chunkP[i].origSize := integer(remaining);
+                remaining := 0;
+            end;
+            chunkP[i].compressedBuffer := _out;
+            inc(_out, maxCompressedChunkSize);
+            chunkP[i].compressedSize := 0;
+        end;
+
+        for chunkNb := 0 to nbChunks - 1 do
+        begin
+            chunkP[chunkNb].compressedSize := LZ4_compress(chunkP[chunkNb].origBuffer, chunkP[chunkNb].compressedBuffer,
+              chunkP[chunkNb].origSize);
+            if (chunkP[chunkNb].compressedSize = 0) then
+            begin
+                Memo.Lines.Add(format('ERROR ! %s() = 0 !! ', ['LZ4_compress']));
+                exit;
+            end;
+        end;
+        if cbDecompressionFunction.ItemIndex = 1 then // LZ4_decompress_fast
+        begin
+            dName := 'LZ4_decompress_fast';
+            decompressionFunction := local_LZ4_decompress_fast;
+        end
+        else if cbDecompressionFunction.ItemIndex = 2 then // LZ4_decompress_fast_withPrefix64k
+        begin
+            dName := 'LZ4_decompress_fast_withPrefix64k';
+            decompressionFunction := local_LZ4_decompress_fast_withPrefix64k;
+        end
+        else if cbDecompressionFunction.ItemIndex = 3 then // LZ4_decompress_fast_usingDict
+        begin
+            dName := 'LZ4_decompress_fast_usingDict';
+            decompressionFunction := local_LZ4_decompress_fast_usingDict;
+        end
+        else if cbDecompressionFunction.ItemIndex = 4 then // LZ4_decompress_safe
+        begin
+            dName := 'LZ4_decompress_safe';
+            decompressionFunction := local_LZ4_decompress_safe;
+        end
+        else if cbDecompressionFunction.ItemIndex = 5 then // LZ4_decompress_safe_withPrefix64k
+        begin
+            dName := 'LZ4_decompress_safe_withPrefix64k';
+            decompressionFunction := local_LZ4_decompress_safe_withPrefix64k;
+        end
+        else if cbDecompressionFunction.ItemIndex = 6 then // LZ4_decompress_safe_usingDict
+        begin
+            dName := 'LZ4_decompress_safe_usingDict';
+            decompressionFunction := local_LZ4_decompress_safe_usingDict;
+        end
+        else if cbDecompressionFunction.ItemIndex = 7 then // LZ4_decompress_safe_partial
+        begin
+            dName := 'LZ4_decompress_safe_partial';
+            decompressionFunction := local_LZ4_decompress_safe_partial;
+        end
+        else if cbDecompressionFunction.ItemIndex = 8 then // LZ4_decompress_safe_forceExtDict
+        begin
+            dName := 'LZ4_decompress_safe_forceExtDict';
+            decompressionFunction := local_LZ4_decompress_safe_forceExtDict;
+        end
+        else if cbDecompressionFunction.ItemIndex = 9 then // LZ4F_decompress
+        begin
+            dName := 'LZ4F_decompress';
+            decompressionFunction := local_LZ4F_decompress;
+            errorCode := LZ4F_compressFrame(compressed_buff, compressedBuffSize, orig_buff, benchedSize, Nil);
+            if LZ4F_isError(errorCode) then
+            begin
+                Memo.Lines.Add('Preparation error compressing frame');
+                exit;
+            end;
+            chunkP[0].origSize := integer(benchedSize);
+            chunkP[0].compressedSize := integer(errorCode);
+            nbChunks := 1;
+        end;
+
+        for ii := 0 to benchedSize - 1 do
+            orig_buff[ii] := #0; // zeroing source area, for CRC checking
+        for loopNb := 1 to nbIterations do
+        begin
+            nb_loops := 0;
+            Stopwatch.start;
+            Elapsed := Stopwatch.Elapsed;
+            milliTime1 := Elapsed.TotalMilliseconds;
+
+            while true do
+            begin
+                Elapsed := Stopwatch.Elapsed;
+                if Elapsed.TotalMilliseconds - milliTime1 > TIMELOOP then
+                    break;
+                for chunkNb := 0 to nbChunks - 1 do
+                begin
+                    decodedSize := decompressionFunction(chunkP[chunkNb].compressedBuffer, chunkP[chunkNb].origBuffer,
+                      chunkP[chunkNb].compressedSize, chunkP[chunkNb].origSize);
+                    if (chunkP[chunkNb].origSize <> decodedSize) then
+                    begin
+                        Memo.Lines.Add(format('ERROR ! %s() == %d != %d !!', [dName, decodedSize, chunkP[chunkNb].origSize]));
+                        exit;
+                    end;
+                end;
+                inc(nb_loops);
+            end;
+            Elapsed := Stopwatch.Elapsed;
+            Stopwatch.stop;
+            millitime2 := Elapsed.TotalMilliseconds;
+            averageTime := (millitime2 - milliTime1) / nb_loops;
+            if (averageTime < bestTime) then
+                bestTime := averageTime;
+
+            Memo.Lines.Add(format('%s :%d -> %f MB/s', [dName, integer(benchedSize),
+              (benchedSize / bestTime) / 1000.]));
+
+            crcDecoded := XXH32(orig_buff, integer(benchedSize), 0);
+            if (crcOriginal <> crcDecoded) then
+                Memo.Lines.Add('WARNING !!! %14s : Invalid Checksum');
+        end;
+        Memo.Lines.Add(format('%s test ended', [compressorName]));
+    finally
         if orig_buff <> nil then
             freemem(orig_buff);
         if compressed_buff <> nil then
             freemem(compressed_buff);
-        freemem(chunkP);
+        if chunkP <> nil then
+            freemem(chunkP);
     end;
-    crcOriginal := XXH32(orig_buff, cardinal(benchedSize), 0);
-
-    cSize := 0;
-    ratio := 0.;
-    bestTime := 100000000.;
-    remaining := benchedSize;
-    _in := orig_buff;
-    _out := compressed_buff;
-    nbChunks := integer((integer(benchedSize) + (chunkSize - 1)) div chunkSize);
-    for i := 0 to nbChunks - 1 do
-    begin
-        chunkP[i].id := i;
-        chunkP[i].origBuffer := _in;
-        inc(_in, chunkSize);
-        if (integer(remaining) > chunkSize) then
-        begin
-            chunkP[i].origSize := chunkSize;
-            dec(remaining, chunkSize);
-        end
-        else
-        begin
-            chunkP[i].origSize := integer(remaining);
-            remaining := 0;
-        end;
-        chunkP[i].compressedBuffer := _out;
-        inc(_out, maxCompressedChunkSize);
-        chunkP[i].compressedSize := 0;
-    end;
-
-    for chunkNb := 0 to nbChunks - 1 do
-    begin
-        chunkP[chunkNb].compressedSize := LZ4_compress(chunkP[chunkNb].origBuffer, chunkP[chunkNb].compressedBuffer,
-          chunkP[chunkNb].origSize);
-        if (chunkP[chunkNb].compressedSize = 0) then
-        begin
-            Memo.Lines.Add(format('ERROR ! %s() = 0 !! ', ['LZ4_compress']));
-            exit;
-        end;
-    end;
-    if cbDecompressionFunction.ItemIndex = 1 then // LZ4_decompress_fast
-    begin
-        dName := 'LZ4_decompress_fast';
-        decompressionFunction := local_LZ4_decompress_fast;
-    end
-    else if cbDecompressionFunction.ItemIndex = 2 then // LZ4_decompress_fast_withPrefix64k
-    begin
-        dName := 'LZ4_decompress_fast_withPrefix64k';
-        decompressionFunction := local_LZ4_decompress_fast_withPrefix64k;
-    end
-    else if cbDecompressionFunction.ItemIndex = 3 then // LZ4_decompress_fast_usingDict
-    begin
-        dName := 'LZ4_decompress_fast_usingDict';
-        decompressionFunction := local_LZ4_decompress_fast_usingDict;
-    end
-    else if cbDecompressionFunction.ItemIndex = 4 then // LZ4_decompress_safe
-    begin
-        dName := 'LZ4_decompress_safe';
-        decompressionFunction := local_LZ4_decompress_safe;
-    end
-    else if cbDecompressionFunction.ItemIndex = 5 then // LZ4_decompress_safe_withPrefix64k
-    begin
-        dName := 'LZ4_decompress_safe_withPrefix64k';
-        decompressionFunction := local_LZ4_decompress_safe_withPrefix64k;
-    end
-    else if cbDecompressionFunction.ItemIndex = 6 then // LZ4_decompress_safe_usingDict
-    begin
-        dName := 'LZ4_decompress_safe_usingDict';
-        decompressionFunction := local_LZ4_decompress_safe_usingDict;
-    end
-    else if cbDecompressionFunction.ItemIndex = 7 then // LZ4_decompress_safe_partial
-    begin
-        dName := 'LZ4_decompress_safe_partial';
-        decompressionFunction := local_LZ4_decompress_safe_partial;
-    end
-    else if cbDecompressionFunction.ItemIndex = 8 then // LZ4_decompress_safe_forceExtDict
-    begin
-        dName := 'LZ4_decompress_safe_forceExtDict';
-        decompressionFunction := local_LZ4_decompress_safe_forceExtDict;
-    end
-    else if cbDecompressionFunction.ItemIndex = 9 then // LZ4F_decompress
-    begin
-        dName := 'LZ4F_decompress';
-        decompressionFunction := local_LZ4F_decompress;
-        errorCode := LZ4F_compressFrame(compressed_buff, compressedBuffSize, orig_buff, benchedSize, Nil);
-        if LZ4F_isError(errorCode) then
-        begin
-            Memo.Lines.Add('Preparation error compressing frame');
-            exit;
-        end;
-        chunkP[0].origSize := integer(benchedSize);
-        chunkP[0].compressedSize := integer(errorCode);
-        nbChunks := 1;
-    end;
-
-    for ii := 0 to benchedSize - 1 do
-        orig_buff[ii] := #0; // zeroing source area, for CRC checking
-    for loopNb := 1 to nbIterations do
-    begin
-        nb_loops := 0;
-        Stopwatch.start;
-        Elapsed := Stopwatch.Elapsed;
-        milliTime1 := Elapsed.TotalMilliseconds;
-
-        while true do
-        begin
-            Elapsed := Stopwatch.Elapsed;
-            if Elapsed.TotalMilliseconds - milliTime1 > TIMELOOP then
-                break;
-            for chunkNb := 0 to nbChunks - 1 do
-            begin
-                decodedSize := decompressionFunction(chunkP[chunkNb].compressedBuffer, chunkP[chunkNb].origBuffer,
-                  chunkP[chunkNb].compressedSize, chunkP[chunkNb].origSize);
-                if (chunkP[chunkNb].origSize <> decodedSize) then
-                begin
-                    Memo.Lines.Add(format('ERROR ! %s() == %d != %d !!', [dName, decodedSize, chunkP[chunkNb].origSize]));
-                    exit;
-                end;
-            end;
-            inc(nb_loops);
-        end;
-        Elapsed := Stopwatch.Elapsed;
-        Stopwatch.stop;
-        millitime2 := Elapsed.TotalMilliseconds;
-        averageTime := (millitime2 - milliTime1) / nb_loops;
-        if (averageTime < bestTime) then
-            bestTime := averageTime;
-
-        Memo.Lines.Add(format('%s :%d -> %f MB/s', [dName, integer(benchedSize),
-          (benchedSize / bestTime) / 1000.]));
-
-        crcDecoded := XXH32(orig_buff, integer(benchedSize), 0);
-        if (crcOriginal <> crcDecoded) then
-            Memo.Lines.Add('WARNING !!! %14s : Invalid Checksum');
-    end;
-    freemem(orig_buff);
-    freemem(compressed_buff);
-    freemem(chunkP);
-    Memo.Lines.Add(format('%s test ended', [compressorName]));
 end;
 
 procedure TmainUnit.cbBlockSizeSelect(Sender: TObject);

@@ -128,6 +128,8 @@ var
     outSize, inSize: cardinal;
 begin
     filesize := 0;
+    in_buff := nil;
+    out_buff := nil;
     compressedfilesize := MAGICNUMBER_SIZE;
     Stopwatch.start;
     Elapsed := Stopwatch.Elapsed;
@@ -148,37 +150,41 @@ begin
 
     in_buff := allocmem(LEGACY_BLOCKSIZE);
     out_buff := allocmem(LZ4_compressBound(LEGACY_BLOCKSIZE));
-    if (in_buff = nil) or (out_buff = nil) then
-        exit(reportError('Allocation error : not enough memory'));
-    LZ4IO_writeLE32(out_buff, LEGACY_MAGICNUMBER);
-    sizeCheck := fileOut.Write(out_buff^, MAGICNUMBER_SIZE);
-    if sizeCheck <> MAGICNUMBER_SIZE then
-        exit(reportError('Write error : cannot write header'));
-    while true do
-    begin
-        inSize := fileIn.Read(in_buff^, LEGACY_BLOCKSIZE);
-        if inSize <= 0 then
-            break;
-        inc(filesize, inSize);
-        outSize := compressionFunction(in_buff, out_buff + 4, inSize);
-        inc(compressedfilesize, outSize + 4);
-        LZ4IO_writeLE32(out_buff, outSize);
-        sizeCheck := fileOut.Write(out_buff^, outSize + 4);
-        if sizeCheck <> size_t(outSize + 4) then
-            exit(reportError('Write error : cannot write compressed block'));
+    try
+        if (in_buff = nil) or (out_buff = nil) then
+            exit(reportError('Allocation error : not enough memory'));
+        LZ4IO_writeLE32(out_buff, LEGACY_MAGICNUMBER);
+        sizeCheck := fileOut.Write(out_buff^, MAGICNUMBER_SIZE);
+        if sizeCheck <> MAGICNUMBER_SIZE then
+            exit(reportError('Write error : cannot write header'));
+        while true do
+        begin
+            inSize := fileIn.Read(in_buff^, LEGACY_BLOCKSIZE);
+            if inSize <= 0 then
+                break;
+            inc(filesize, inSize);
+            outSize := compressionFunction(in_buff, out_buff + 4, inSize);
+            inc(compressedfilesize, outSize + 4);
+            LZ4IO_writeLE32(out_buff, outSize);
+            sizeCheck := fileOut.Write(out_buff^, outSize + 4);
+            if sizeCheck <> size_t(outSize + 4) then
+                exit(reportError('Write error : cannot write compressed block'));
+        end;
+        Elapsed := Stopwatch.Elapsed;
+        Stopwatch.stop;
+        timeEnd := Elapsed.TotalMilliseconds;
+        LZ4Client.Memo.Lines.Add(format('Compressed %d bytes into %d bytes ==> %f%%', [filesize, compressedfilesize,
+          (compressedfilesize / filesize) * 100]));
+        LZ4Client.Memo.Lines.Add(format('Done in %f miliseconds', [timeEnd - timeStart]));
+    finally
+        if in_buff <> nil then
+            freemem(in_buff);
+        if out_buff <> nil then
+            freemem(out_buff);
+        fileIn.Free;
+        fileOut.Free;
+        result := 0;
     end;
-    freemem(in_buff);
-    freemem(out_buff);
-    fileIn.Free;
-    fileOut.Free;
-    Elapsed := Stopwatch.Elapsed;
-    Stopwatch.stop;
-    timeEnd := Elapsed.TotalMilliseconds;
-    LZ4Client.Memo.Lines.Add(format('Compressed %d bytes into %d bytes ==> %f%%', [filesize, compressedfilesize,
-      (compressedfilesize / filesize) * 100]));
-    LZ4Client.Memo.Lines.Add(format('Done in %f miliseconds', [timeEnd - timeStart]));
-
-    result := 0;
 end;
 
 function LZ4IO_setBlockSizeID(bsid: integer): integer;
@@ -213,6 +219,8 @@ var
     timeEnd: tDateTime;
 begin
     result := 0;
+    in_buff := nil;
+    out_buff := nil;
     Stopwatch.start;
     Elapsed := Stopwatch.Elapsed;
     timeStart := Elapsed.TotalMilliseconds;
@@ -243,54 +251,59 @@ begin
     in_buff := allocmem(blockSize);
     outBuffSize := LZ4F_compressBound(blockSize, @prefs);
     out_buff := allocmem(outBuffSize);
-    if (in_buff = nil) or (out_buff = nil) then
-        exit(reportError('Allocation error : not enough memory'));
-    // Write Archive Header
-    headerSize := LZ4F_compressBegin(ctx, out_buff, outBuffSize, @prefs);
-    if (LZ4F_isError(headerSize)) then
-        exit(reportError(format('File header generation failed: %s', [LZ4F_getErrorName(errorCode)])));
-    sizeCheck := fileOut.Write(out_buff^, headerSize);
-    if sizeCheck <> headerSize then
-        exit(reportError('Write error : cannot write header'));
+    try
+        if (in_buff = nil) or (out_buff = nil) then
+            exit(reportError('Allocation error : not enough memory'));
+        // Write Archive Header
+        headerSize := LZ4F_compressBegin(ctx, out_buff, outBuffSize, @prefs);
+        if (LZ4F_isError(headerSize)) then
+            exit(reportError(format('File header generation failed: %s', [LZ4F_getErrorName(errorCode)])));
+        sizeCheck := fileOut.Write(out_buff^, headerSize);
+        if sizeCheck <> headerSize then
+            exit(reportError('Write error : cannot write header'));
 
-    inc(compressedfilesize, headerSize);
+        inc(compressedfilesize, headerSize);
 
-    readSize := fileIn.Read(in_buff^, blockSize);
-    inc(filesize, readSize);
-    while readSize > 0 do
-    begin
-        outSize := LZ4F_compressUpdate(ctx, out_buff, outBuffSize, in_buff, readSize, Nil);
-        if (LZ4F_isError(outSize)) then
-            exit(reportError(format('Compression failed: %s', [LZ4F_getErrorName(errorCode)])));
-        inc(compressedfilesize, outSize);
-        sizeCheck := fileOut.Write(out_buff^, outSize);
-        if sizeCheck <> outSize then
-            exit(reportError('Write error : cannot write compressed block'));
         readSize := fileIn.Read(in_buff^, blockSize);
         inc(filesize, readSize);
-    end;
-    // End of Stream mark
-    headerSize := LZ4F_compressEnd(ctx, out_buff, outBuffSize, Nil);
-    if LZ4F_isError(headerSize) then
-        exit(reportError(format('End of file generation failed: %s', [LZ4F_getErrorName(errorCode)])));
-    sizeCheck := fileOut.Write(out_buff^, headerSize);
-    if sizeCheck <> headerSize then
-        exit(reportError('Write error : cannot write end of stream'));
-    inc(compressedfilesize, headerSize);
-    freemem(in_buff);
-    freemem(out_buff);
-    fileIn.Free;;
-    fileOut.Free;
-    errorCode := LZ4F_freeCompressionContext(ctx);
-    if LZ4F_isError(errorCode) then
-        exit(reportError(format('Error : can''t free LZ4F context resource: %s', [LZ4F_getErrorName(errorCode)])));
-    Elapsed := Stopwatch.Elapsed;
-    Stopwatch.stop;
-    timeEnd := Elapsed.TotalMilliseconds;
+        while readSize > 0 do
+        begin
+            outSize := LZ4F_compressUpdate(ctx, out_buff, outBuffSize, in_buff, readSize, Nil);
+            if (LZ4F_isError(outSize)) then
+                exit(reportError(format('Compression failed: %s', [LZ4F_getErrorName(errorCode)])));
+            inc(compressedfilesize, outSize);
+            sizeCheck := fileOut.Write(out_buff^, outSize);
+            if sizeCheck <> outSize then
+                exit(reportError('Write error : cannot write compressed block'));
+            readSize := fileIn.Read(in_buff^, blockSize);
+            inc(filesize, readSize);
+        end;
+        // End of Stream mark
+        headerSize := LZ4F_compressEnd(ctx, out_buff, outBuffSize, Nil);
+        if LZ4F_isError(headerSize) then
+            exit(reportError(format('End of file generation failed: %s', [LZ4F_getErrorName(errorCode)])));
+        sizeCheck := fileOut.Write(out_buff^, headerSize);
+        if sizeCheck <> headerSize then
+            exit(reportError('Write error : cannot write end of stream'));
+        inc(compressedfilesize, headerSize);
+        errorCode := LZ4F_freeCompressionContext(ctx);
+        if LZ4F_isError(errorCode) then
+            exit(reportError(format('Error : can''t free LZ4F context resource: %s', [LZ4F_getErrorName(errorCode)])));
+        Elapsed := Stopwatch.Elapsed;
+        Stopwatch.stop;
+        timeEnd := Elapsed.TotalMilliseconds;
 
-    LZ4Client.Memo.Lines.Add(format('Compressed %d bytes into %d bytes ==> %f%%', [filesize, compressedfilesize,
-      (compressedfilesize / filesize) * 100]));
-    LZ4Client.Memo.Lines.Add(format('Done in %f miliseconds', [timeEnd - timeStart]));
+        LZ4Client.Memo.Lines.Add(format('Compressed %d bytes into %d bytes ==> %f%%', [filesize, compressedfilesize,
+          (compressedfilesize / filesize) * 100]));
+        LZ4Client.Memo.Lines.Add(format('Done in %f miliseconds', [timeEnd - timeStart]));
+    finally
+        if in_buff <> nil then
+            freemem(in_buff);
+        if out_buff <> nil then
+            freemem(out_buff);
+        fileIn.Free;;
+        fileOut.Free;
+    end;
 end;
 
 function LZ4IO_readLE32(s: pointer): cardinal;
@@ -326,6 +339,8 @@ var
     decodedBytes: size_t;
 begin
     filesize := 0;
+    inBuff := nil;
+    outBuff := nil;
     errorCode := LZ4F_createDecompressionContext(ctx, LZ4F_VERSION);
     if LZ4F_isError(errorCode) then
         exit(reportError(format('Allocation error : can''t create context: %s', [LZ4F_getErrorName(errorCode)])));
@@ -349,31 +364,36 @@ begin
     inBuffSize := outBuffSize + 4;
     inBuff := allocmem(inBuffSize);
     outBuff := allocmem(outBuffSize);
-    if (inBuff = nil) or (outBuff = nil) then
-        exit(reportError('Allocation error : not enough memory'));
-    while (nextToRead <> 0) do
-    begin
-        decodedBytes := outBuffSize;
-        sizeCheck := finput.Read(inBuff^, nextToRead);
-        if sizeCheck <> nextToRead then
-            exit(reportError('Read error'));
-        errorCode := LZ4F_decompress(ctx, outBuff, @decodedBytes, inBuff, @sizeCheck, Nil);
+    try
+        if (inBuff = nil) or (outBuff = nil) then
+            exit(reportError('Allocation error : not enough memory'));
+        while (nextToRead <> 0) do
+        begin
+            decodedBytes := outBuffSize;
+            sizeCheck := finput.Read(inBuff^, nextToRead);
+            if sizeCheck <> nextToRead then
+                exit(reportError('Read error'));
+            errorCode := LZ4F_decompress(ctx, outBuff, @decodedBytes, inBuff, @sizeCheck, Nil);
+            if LZ4F_isError(errorCode) then
+                exit(reportError(format('Decompression error: %s', [LZ4F_getErrorName(errorCode)])));
+            if sizeCheck <> nextToRead then
+                exit(reportError('Synchronization error'));
+            nextToRead := errorCode;
+            inc(filesize, decodedBytes);
+            sizeCheck := foutput.Write(outBuff^, decodedBytes);
+            if sizeCheck <> decodedBytes then
+                exit(reportError('Write error : cannot write decoded block'));
+        end;
+        errorCode := LZ4F_freeDecompressionContext(ctx);
         if LZ4F_isError(errorCode) then
-            exit(reportError(format('Decompression error: %s', [LZ4F_getErrorName(errorCode)])));
-        if sizeCheck <> nextToRead then
-            exit(reportError('Synchronization error'));
-        nextToRead := errorCode;
-        inc(filesize, decodedBytes);
-        sizeCheck := foutput.Write(outBuff^, decodedBytes);
-        if sizeCheck <> decodedBytes then
-            exit(reportError('Write error : cannot write decoded block'));
+            exit(reportError(format('Error : can''t free LZ4F context resource: %s', [LZ4F_getErrorName(errorCode)])));
+    finally
+        if inBuff <> nil then
+            freemem(inBuff);
+        if outBuff <> nil then
+            freemem(outBuff);
+        result := filesize;
     end;
-    freemem(inBuff);
-    freemem(outBuff);
-    errorCode := LZ4F_freeDecompressionContext(ctx);
-    if LZ4F_isError(errorCode) then
-        exit(reportError(format('Error : can''t free LZ4F context resource: %s', [LZ4F_getErrorName(errorCode)])));
-    result := filesize;
 end;
 
 function decodeLegacyStream(finput, foutput: TFileSTream): uint64;
@@ -386,35 +406,42 @@ var
     blockSize: cardinal;
 begin
     filesize := 0;
+    in_buff := nil;
+    out_buff := nil;
     in_buff := allocmem(LZ4_compressBound(LEGACY_BLOCKSIZE));
     out_buff := allocmem(LEGACY_BLOCKSIZE);
-    if (in_buff = nil) or (out_buff = nil) then
-        exit(reportError('Allocation error : not enough memory'));
-    while true do
-    begin
-        sizeCheck := finput.Read(in_buff^, 4);
-        if sizeCheck = 0 then
-            break;
-        blockSize := LZ4IO_readLE32(in_buff);
-        if blockSize > LZ4_compressBound(LEGACY_BLOCKSIZE) then
+    try
+        if (in_buff = nil) or (out_buff = nil) then
+            exit(reportError('Allocation error : not enough memory'));
+        while true do
         begin
-            finput.Seek(-4, soFromCurrent);
-            break;
+            sizeCheck := finput.Read(in_buff^, 4);
+            if sizeCheck = 0 then
+                break;
+            blockSize := LZ4IO_readLE32(in_buff);
+            if blockSize > LZ4_compressBound(LEGACY_BLOCKSIZE) then
+            begin
+                finput.Seek(-4, soFromCurrent);
+                break;
+            end;
+            sizeCheck := finput.Read(in_buff^, blockSize);
+            if sizeCheck <> blockSize then
+                exit(reportError('Error reading input file'));
+            decodeSize := LZ4_decompress_safe(in_buff, out_buff, blockSize, LEGACY_BLOCKSIZE);
+            if (decodeSize < 0) then
+                exit(reportError('Decoding Failed ! Corrupted input detected'));
+            inc(filesize, decodeSize);
+            sizeCheck := foutput.Write(out_buff^, decodeSize);
+            if sizeCheck <> size_t(decodeSize) then
+                exit(reportError('Write error : cannot write decoded block into output'));
         end;
-        sizeCheck := finput.Read(in_buff^, blockSize);
-        if sizeCheck <> blockSize then
-            exit(reportError('Error reading input file'));
-        decodeSize := LZ4_decompress_safe(in_buff, out_buff, blockSize, LEGACY_BLOCKSIZE);
-        if (decodeSize < 0) then
-            exit(reportError('Decoding Failed ! Corrupted input detected'));
-        inc(filesize, decodeSize);
-        sizeCheck := foutput.Write(out_buff^, decodeSize);
-        if sizeCheck <> size_t(decodeSize) then
-            exit(reportError('Write error : cannot write decoded block into output'));
+    finally
+        if in_buff <> nil then
+            freemem(in_buff);
+        if out_buff <> nil then
+            freemem(out_buff);
+        result := filesize;
     end;
-    freemem(in_buff);
-    freemem(out_buff);
-    result := filesize;
 end;
 
 function selectDecoder(finput, foutput: TFileSTream): uint64;

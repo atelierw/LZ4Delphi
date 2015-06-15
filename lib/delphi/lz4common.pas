@@ -38,6 +38,7 @@
 *)
 
 unit lz4common;
+{$POINTERMATH ON}
 {$I lz4AppDefines.inc}
 
 interface
